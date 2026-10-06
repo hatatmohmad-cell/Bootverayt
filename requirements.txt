@@ -1,4 +1,2 @@
 aiogram==3.4.1
 playwright==1.42.0
-playwright-stealth==1.0.6
-setuptools
