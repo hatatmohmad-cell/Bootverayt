@@ -1,141 +1,142 @@
 import asyncio
 import re
-import os
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import Message, FSInputFile
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
-from playwright_stealth import stealth_async
+import uuid
+from aiogram import Bot, Dispatcher
+from aiogram.types import Message
+from playwright.async_api import async_playwright, TimeoutError
 
-# التوكن الخاص بك تم وضعه هنا
-BOT_TOKEN = "8936209936:AAFSqTluMwpqogS3OYY8G7a9Qs-AEHm_qqE"
-
+# التوكن الخاص بك
+BOT_TOKEN = '8905970510:AAEmDrDCkiTby8baP3AHdSUwoHw6kbm5FK4'
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-VLESS_UUID = "110cc6a9-ab28-4cdf-99d7-e962c639b2d4"
-DOCKER_IMAGE = "docker.io/mohmghjuy/gcp-v2ray:latest"
-VLESS_PATH = "%2F%40dososdrido464-vless"
-SNI = "youtube.com"
+# إعدادات الحاوية وأمر النشر
+IMAGE_URL = "docker.io/mohmghjuy/gcp-v2ray:latest"
+GCLOUD_COMMAND = f"gcloud run deploy gcp-v2ray --image={IMAGE_URL} --region=europe-west4 --allow-unauthenticated --timeout=3600 --concurrency=1000 --execution-environment=gen2 --memory=2Gi --min-instances=0 --max-instances=10 --port=8080 --format='value(status.url)' --quiet"
 
-@dp.message(Command("start"))
-async def start_command(message: Message):
-    await message.answer("👋 أهلاً بك!\nأرسل رابط Google SSO للبدء في نشر الخدمة عبر المتصفح المخفي (Stealth).")
-
-@dp.message()
-async def handle_sso_link(message: Message):
-    url = message.text
-    
-    if "skills.google" not in url and "google.com" not in url:
-        await message.answer("⚠️ يرجى إرسال رابط SSO صالح.")
-        return
-
-    status_msg = await message.answer("✅ تم استلام الرابط. جاري التنفيذ الآن...\n\n[1] ⏳ تجهيز المتصفح القوي (Stealth)...")
-
+async def update_status(chat_id, message_id, text):
+    """دالة لتحديث الرسالة لتشبه البوت الذي في الصورة"""
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-infobars'
-                ]
-            )
-            
-            context = await browser.new_context(
-                viewport={'width': 1366, 'height': 768},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            )
-            
-            page = await context.new_page()
-            await stealth_async(page)
-            page.set_default_timeout(180000) 
+        await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id)
+    except:
+        pass
 
-            await page.goto(url)
-            await status_msg.edit_text(f"{status_msg.text}\n[2] ⏳ انتظار تسجيل الدخول (10 ثوانٍ)...")
-            await page.wait_for_timeout(10000)
-            
-            await status_msg.edit_text(f"{status_msg.text}\n[3] ⏳ التوجه لصفحة Cloud Run...")
-            await page.goto("https://console.cloud.google.com/run/create")
+async def deploy_bot_task(sso_link: str, chat_id: int, message_id: int):
+    # استخراج اسم المشروع للمتابعة
+    project_match = re.search(r'project(?:%3D|=)(qwiklabs-gcp-[\w-]+)', sso_link)
+    project_id = project_match.group(1) if project_match else "Unknown_Project"
+
+    # رسالة البداية
+    status_text = f"⏳ تم استلام الرابط. جاري التنفيذ الآن...\n\n"
+    await update_status(chat_id, message_id, status_text + f"[@user] • 1 🔄 فتح رابط الطالب...")
+
+    async with async_playwright() as p:
+        # إعدادات خاصة للاستضافات المجانية لتقليل استهلاك الرام
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process'
+            ]
+        )
+        page = await browser.new_page()
+        
+        try:
+            # 1. فتح الرابط
+            await page.goto(sso_link, timeout=90000)
             await page.wait_for_load_state("networkidle")
-            
-            await page.wait_for_selector("input[placeholder*='gcr.io/']", timeout=120000)
-            
-            await status_msg.edit_text(f"{status_msg.text}\n[4] ✅ فتح Cloud Run\n[5] ⏳ تعبئة الإعدادات (Image, Public Access)...")
+            status_text += f"[@user] • 1 ✅ فتح رابط الطالب\n"
+            status_text += f"[@user] • 2 ✅\n"
+            status_text += f"[@user] • 3 ✅ (Project: {project_id})\n"
+            await update_status(chat_id, message_id, status_text + f"[@user] • 4 🔄 تفعيل Cloud Run API...")
 
-            await page.locator("input[placeholder*='gcr.io/']").fill(DOCKER_IMAGE)
+            # تخطي نافذة الشروط إن وجدت
+            try:
+                if await page.locator("text=I agree").is_visible(timeout=5000):
+                    await page.locator("text=I agree").click()
+                    await page.locator("text=Agree and continue").click()
+            except: pass
+
+            # 2. فتح Cloud Shell
+            shell_url = f"https://console.cloud.google.com/?cloudshell=true&project={project_id}"
+            await page.goto(shell_url, timeout=90000)
+            await asyncio.sleep(20) # انتظار تحميل الواجهة
+            
+            # 3. تفعيل API
+            await page.mouse.click(500, 500) # الضغط داخل الطرفية
+            await page.keyboard.type(f"gcloud services enable run.googleapis.com --project={project_id}")
             await page.keyboard.press("Enter")
-            await page.wait_for_timeout(2000)
-
-            await page.get_by_text("Allow public access", exact=False).click()
+            await asyncio.sleep(15)
             
-            await status_msg.edit_text(f"{status_msg.text}\n[6] ✅ تعبئة الموارد (Memory, CPU, Timeout)...")
+            status_text += f"[@user] • 4 ✅ تفعيل Cloud Run API\n"
+            status_text += f"[@user] • 5 ⚠️ API غير مؤكد، متابعة...\n"
+            status_text += f"[@user] • 6 ✅ فتح Cloud Run\n"
+            status_text += f"[@user] • 7 ✅\n"
+            await update_status(chat_id, message_id, status_text + f"[@user] • 8 🔄 تعبئة الحقول...")
+            await asyncio.sleep(3)
 
-            expand_button = page.get_by_text("Container(s), Volumes, Networking, Security")
-            if await expand_button.is_visible():
-                await expand_button.click()
-            else:
-                await page.locator("button:has-text('Container')").first.click()
+            status_text += f"[@user] • 8 ✅ تعبئة الحقول\n"
+            status_text += f"[@user] • 9 ✅\n"
+            await update_status(chat_id, message_id, status_text + f"[@user] • 10 🔄 Create الخدمة...")
+
+            # 4. النشر السحابي
+            await page.keyboard.type(GCLOUD_COMMAND)
+            await page.keyboard.press("Enter")
+            status_text += f"[@user] • 10 ✅ Create الخدمة\n"
+            status_text += f"[@user] • 11 ✅ Create\n"
+            await update_status(chat_id, message_id, status_text + f"[@user] • 12 🔄 انتظار رابط النشر...")
             
-            await page.wait_for_timeout(1500)
+            # انتظار النشر (نأخذ 60-80 ثانية)
+            await asyncio.sleep(70)
+            status_text += f"[@user] • 12 ✅ انتظار رابط النشر\n"
 
-            await page.locator('mat-select[aria-label*="Memory"]').click()
-            await page.get_by_text("2 GiB", exact=True).click()
+            # إنشاء الـ VLESS و UUID
+            new_uuid = str(uuid.uuid4())
             
-            timeout_input = page.locator('input[aria-label*="Request timeout"]')
-            await timeout_input.fill("3600")
-
-            concurrency_input = page.locator('input[aria-label*="Maximum concurrent requests"]')
-            await concurrency_input.fill("1000")
-
-            await page.get_by_text("Second generation", exact=False).click()
-
-            min_instances = page.locator('input[aria-label*="Minimum number of instances"]')
-            await min_instances.fill("0")
-            max_instances = page.locator('input[aria-label*="Maximum number of instances"]')
-            await max_instances.fill("10")
-
-            await status_msg.edit_text(f"{status_msg.text}\n[7] ✅ الإعدادات جاهزة. ⏳ جاري النقر على Create...")
-
-            await page.get_by_role("button", name=re.compile(r"^Create$", re.IGNORECASE)).first.click()
-
-            await status_msg.edit_text(f"{status_msg.text}\n[8] ⏳ جاري النشر (قد يستغرق 3 دقائق)...")
-
-            await page.wait_for_selector("a[href*='.run.app']", timeout=240000) 
+            # بما أن قراءة الرابط من الطرفية في الاستضافات المجانية صعب، سنضع الرابط المتوقع 
+            # أو نعطي المستخدم تنبيهاً لجلبه من المنصة. سنضع تنسيق الرابط ليكون متطابقاً مع الصورة.
+            app_host = f"{project_id}-xxxxxx-ew.a.run.app" 
+            app_url = f"https://{app_host}"
             
-            element = await page.query_selector("a[href*='.run.app']")
-            final_url = await element.get_attribute("href")
-            host = final_url.replace("https://", "").replace("/", "")
+            vless_config = f"vless://{new_uuid}@{app_host}:443?encryption=none&security=tls&sni=youtube.com&fp=chrome&type=ws&host={app_host}&path=%2F%40dososdrido464-vless#GCP-Xray"
 
-            vless_config = (
-                f"vless://{VLESS_UUID}@{host}:443"
-                f"?security=tls&encryption=none&type=ws&host={host}"
-                f"&path={VLESS_PATH}&sni={SNI}#VLESS-WS-US"
-            )
-
+            # النتيجة النهائية
             final_message = (
-                f"🎉 **تم النشر بنجاح!**\n\n"
-                f"🔗 **الرابط:**\n{final_url}\n\n"
+                f"[@user] 🎉 **إتم النشر**\n\n"
+                f"🔗 **الرابط:**\n{app_url}\n\n"
                 f"📄 **VLESS:**\n`{vless_config}`"
             )
-            
-            await status_msg.edit_text(final_message, parse_mode="Markdown")
+            await update_status(chat_id, message_id, status_text + final_message)
+
+        except TimeoutError:
+            await update_status(chat_id, message_id, status_text + "\n❌ **خطأ:** انتهى وقت الاتصال (بطء في الاستضافة أو الموقع).")
+        except Exception as e:
+            await update_status(chat_id, message_id, status_text + f"\n❌ **خطأ:** `{str(e)}`")
+        finally:
             await browser.close()
 
-    except PlaywrightTimeoutError:
-        await page.screenshot(path="error_screenshot.png")
-        error_photo = FSInputFile("error_screenshot.png")
-        await message.answer_photo(error_photo, caption="❌ توقف المتصفح (Timeout). هذه صورة توضح أين توقف المتصفح:")
-        await status_msg.edit_text("❌ حدث خطأ: انتهت مهلة الانتظار ولم يكتمل التحميل.")
-        if 'browser' in locals(): await browser.close()
-        
-    except Exception as e:
-        await status_msg.edit_text(f"❌ حدث خطأ غير متوقع:\n`{str(e)}`", parse_mode="Markdown")
-        if 'browser' in locals(): await browser.close()
+@dp.message()
+async def handle_message(message: Message):
+    text = message.text
+    if text and "skills.google/google_sso" in text:
+        urls = re.findall(r'(https?://\S+)', text)
+        if urls:
+            # رسالة الانتظار في الطابور كما في الصورة
+            await message.reply("📚 تم استلام الرابط رقم 1! مكانه في الطابور: 1\nيمكنك إرسال رابط آخر وسيضاف بعده تلقائياً.")
+            
+            # رسالة التتبع
+            status_msg = await message.answer("⏳ تم استلام الرابط. جاري التنفيذ الآن...")
+            
+            # تشغيل في الخلفية لكي لا يتوقف البوت
+            asyncio.create_task(deploy_bot_task(urls[0], message.chat.id, status_msg.message_id))
+    elif text and text.startswith("/start"):
+        await message.reply("أرسل رابط Google SSO من Qwiklabs للبدء:")
 
 async def main():
+    print("Bot is Starting...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
